@@ -86,7 +86,7 @@ def chrome_driver():
     return driver
 
 
-def new_driver_with_retries(max_retries=3):
+def new_driver_with_retries(max_retries=3, backoff=5):
     last_exc = None
     for attempt in range(1, max_retries + 1):
         try:
@@ -94,12 +94,8 @@ def new_driver_with_retries(max_retries=3):
             return chrome_driver()
         except (SessionNotCreatedException, WebDriverException) as e:
             last_exc = e
-            msg = str(e)
-            if "DevToolsActivePort file doesn't exist" in msg:
-                print("💥 DevToolsActivePort issue when starting Chrome; retrying in 5s...")
-            else:
-                print(f"💥 WebDriverException on startup; retrying in 5s... {e}")
-            time.sleep(5)
+            print(f"💥 WebDriverException on startup; retrying in {backoff}s... {e}")
+            time.sleep(backoff)
     raise DriverCrashed(f"Could not start Chrome after {max_retries} attempts: {last_exc}")
 
 
@@ -586,7 +582,12 @@ def retry_manual_rows(driver):
 
 if __name__ == "__main__":
     print("🚀 scrape_commission.py starting up...")
-    driver = new_driver_with_retries()
+    try:
+        driver = new_driver_with_retries()
+    except DriverCrashed as e:
+        print(f"❌ Could not start initial Chrome driver: {e}")
+        raise SystemExit(1)
+
     try:
         ok = ensure_amazon_session(driver, AMZ_EMAIL, AMZ_PASS)
         if not ok:
@@ -676,10 +677,19 @@ if __name__ == "__main__":
                 driver.quit()
             except Exception:
                 pass
-            time.sleep(5)
-            driver = new_driver_with_retries()
+
+            print("⏳ Cool-down 60s before attempting to restart Chrome...")
+            time.sleep(60)
+
+            try:
+                driver = new_driver_with_retries()
+            except DriverCrashed as e2:
+                print(f"❌ Could not recover WebDriver after crash: {e2}")
+                raise SystemExit(1)
+
             if not ensure_amazon_session(driver, AMZ_EMAIL, AMZ_PASS):
                 print("❌ Could not re-establish Amazon session after driver crash.")
+                raise SystemExit(1)
 
         except Exception as e:
             print(f"❌ Fatal loop error: {e}")
@@ -687,10 +697,19 @@ if __name__ == "__main__":
                 driver.quit()
             except Exception:
                 pass
-            time.sleep(5)
-            driver = new_driver_with_retries()
+
+            print("⏳ Cool-down 60s before attempting full restart...")
+            time.sleep(60)
+
+            try:
+                driver = new_driver_with_retries()
+            except DriverCrashed as e2:
+                print(f"❌ Could not recover WebDriver after generic error: {e2}")
+                raise SystemExit(1)
+
             if not ensure_amazon_session(driver, AMZ_EMAIL, AMZ_PASS):
                 print("❌ Could not re-establish Amazon session.")
+                raise SystemExit(1)
 
         print("⏳ Sleep 5 minutes...")
         time.sleep(300)
