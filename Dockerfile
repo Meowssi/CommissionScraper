@@ -1,7 +1,11 @@
-FROM python:3.11-slim
+FROM debian:bullseye
 
-# Install system dependencies Chrome needs
+# Prevent interactive prompts
+ENV DEBIAN_FRONTEND=noninteractive
+
 RUN apt-get update && apt-get install -y \
+    python3 \
+    python3-pip \
     chromium \
     chromium-driver \
     wget \
@@ -24,20 +28,14 @@ RUN apt-get update && apt-get install -y \
     fonts-liberation \
     && rm -rf /var/lib/apt/lists/*
 
-# Chrome path environment variables
 ENV CHROME_BIN=/usr/bin/chromium
 ENV CHROMEDRIVER_PATH=/usr/bin/chromedriver
 ENV CHROME_USER_DATA_DIR=/tmp/chrome-profile
 
-# Create Chrome user data directory
-RUN mkdir -p /tmp/chrome-profile
-
 WORKDIR /app
-
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip3 install --no-cache-dir -r requirements.txt
 
 COPY scrape_commission.py .
 
-# Start your script
-CMD ["python", "scrape_commission.py"]
+CMD ["python3", "scrape_commission.py"]
