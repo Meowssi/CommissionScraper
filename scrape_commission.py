@@ -1,5 +1,12 @@
 import os, re, time, random, json
 from urllib.parse import urlparse, parse_qs, unquote
+import warnings
+
+# Suppress the noisy urllib3/chardet RequestsDependencyWarning
+warnings.filterwarnings(
+    "ignore",
+    message="urllib3 (.*) or chardet (.*) doesn't match a supported",
+)
 
 from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
@@ -578,6 +585,7 @@ def retry_manual_rows(driver):
 
 
 if __name__ == "__main__":
+    print("🚀 scrape_commission.py starting up...")
     driver = new_driver_with_retries()
     try:
         ok = ensure_amazon_session(driver, AMZ_EMAIL, AMZ_PASS)
