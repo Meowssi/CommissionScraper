@@ -1,0 +1,17 @@
+services:
+  - type: worker
+    name: amazon-commission-scraper
+    env: docker
+    plan: starter
+    autoDeploy: true
+    envVars:
+      - key: GOOGLE_SERVICE_ACCOUNT_JSON
+        sync: false
+      - key: SPREADSHEET_ID
+        value: 1vw9t8rVyC0M5xrrKoTqgHll2XlS_96ExXJSqZACU-vc
+      - key: SHEET_NAME
+        value: Jeff's Thread Tracker v2
+      - key: AMZ_EMAIL
+        sync: false
+      - key: AMZ_PASS
+        sync: false
