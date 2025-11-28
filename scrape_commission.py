@@ -10,6 +10,7 @@ from selenium.common.exceptions import (
     TimeoutException,
     NoSuchWindowException,
     WebDriverException,
+    SessionNotCreatedException,
 )
 import gspread
 from google.oauth2.service_account import Credentials
@@ -25,6 +26,8 @@ AMZ_PASS = os.environ["AMZ_PASS"]
 
 CHROME_BIN = os.environ.get("CHROME_BIN", "/usr/bin/chromium")
 CHROMEDRIVER_PATH = os.environ.get("CHROMEDRIVER_PATH", "/usr/bin/chromedriver")
+PROFILE_ROOT = os.environ.get("CHROME_USER_DATA_DIR", "/tmp/chrome-profile-root")
+os.makedirs(PROFILE_ROOT, exist_ok=True)
 
 creds = Credentials.from_service_account_info(SERVICE_ACCOUNT_INFO, scopes=SCOPES)
 gc = gspread.authorize(creds)
@@ -32,7 +35,6 @@ sheet = gc.open_by_key(SPREADSHEET_ID).worksheet(SHEET_NAME)
 
 
 class DriverCrashed(Exception):
-    """Raised when the Selenium/WebDriver connection is clearly dead."""
     pass
 
 
@@ -63,12 +65,35 @@ def chrome_driver():
     options.add_argument("--disable-blink-features=AutomationControlled")
     options.add_argument("--disable-features=NetworkServiceInProcess")
     options.add_argument("--log-level=3")
-    user_data_dir = os.environ.get("CHROME_USER_DATA_DIR", "/tmp/chrome-profile")
-    options.add_argument(f"--user-data-dir={user_data_dir}")
+    options.add_argument("--remote-debugging-port=9222")
+
+    profile_dir = os.path.join(
+        PROFILE_ROOT,
+        f"profile-{int(time.time() * 1000)}-{random.randint(1000, 9999)}",
+    )
+    options.add_argument(f"--user-data-dir={profile_dir}")
+
     options.page_load_strategy = "eager"
     driver = webdriver.Chrome(service=service, options=options)
     driver.set_page_load_timeout(60)
     return driver
+
+
+def new_driver_with_retries(max_retries=3):
+    last_exc = None
+    for attempt in range(1, max_retries + 1):
+        try:
+            print(f"🚗 Starting Chrome (attempt {attempt}/{max_retries})")
+            return chrome_driver()
+        except (SessionNotCreatedException, WebDriverException) as e:
+            last_exc = e
+            msg = str(e)
+            if "DevToolsActivePort file doesn't exist" in msg:
+                print("💥 DevToolsActivePort issue when starting Chrome; retrying in 5s...")
+            else:
+                print(f"💥 WebDriverException on startup; retrying in 5s... {e}")
+            time.sleep(5)
+    raise DriverCrashed(f"Could not start Chrome after {max_retries} attempts: {last_exc}")
 
 
 def amazon_login(driver, email, password, timeout=30):
@@ -553,7 +578,7 @@ def retry_manual_rows(driver):
 
 
 if __name__ == "__main__":
-    driver = chrome_driver()
+    driver = new_driver_with_retries()
     try:
         ok = ensure_amazon_session(driver, AMZ_EMAIL, AMZ_PASS)
         if not ok:
@@ -608,7 +633,7 @@ if __name__ == "__main__":
                         total_pct = process_row(driver, row_num, thread_url)
                     except DriverCrashed as e:
                         print(f"💥 Driver crashed during main rows at row {row_num}: {e}")
-                        raise  # Let outer fatal loop handle restart
+                        raise
 
                     if total_pct is None:
                         mark_manual(row_num)
@@ -644,7 +669,7 @@ if __name__ == "__main__":
             except Exception:
                 pass
             time.sleep(5)
-            driver = chrome_driver()
+            driver = new_driver_with_retries()
             if not ensure_amazon_session(driver, AMZ_EMAIL, AMZ_PASS):
                 print("❌ Could not re-establish Amazon session after driver crash.")
 
@@ -655,7 +680,7 @@ if __name__ == "__main__":
             except Exception:
                 pass
             time.sleep(5)
-            driver = chrome_driver()
+            driver = new_driver_with_retries()
             if not ensure_amazon_session(driver, AMZ_EMAIL, AMZ_PASS):
                 print("❌ Could not re-establish Amazon session.")
 
