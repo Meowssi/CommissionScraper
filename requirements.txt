@@ -1,3 +1,4 @@
 selenium
 gspread
 google-auth
+requests
