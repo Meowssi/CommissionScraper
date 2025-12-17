@@ -22,6 +22,7 @@ from selenium.common.exceptions import (
 )
 import gspread
 from google.oauth2.service_account import Credentials
+from gspread.exceptions import APIError
 
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 
@@ -37,9 +38,30 @@ CHROMEDRIVER_PATH = os.environ.get("CHROMEDRIVER_PATH", "/usr/bin/chromedriver")
 PROFILE_ROOT = os.environ.get("CHROME_USER_DATA_DIR", "/tmp/chrome-profile-root")
 os.makedirs(PROFILE_ROOT, exist_ok=True)
 
-creds = Credentials.from_service_account_info(SERVICE_ACCOUNT_INFO, scopes=SCOPES)
-gc = gspread.authorize(creds)
-sheet = gc.open_by_key(SPREADSHEET_ID).worksheet(SHEET_NAME)
+# === INITIALIZATION WITH RETRY ===
+def get_sheet_with_retry(retries=5, backoff=10):
+    creds = Credentials.from_service_account_info(SERVICE_ACCOUNT_INFO, scopes=SCOPES)
+    gc = gspread.authorize(creds)
+    
+    for i in range(retries):
+        try:
+            sh = gc.open_by_key(SPREADSHEET_ID).worksheet(SHEET_NAME)
+            print("✅ Connected to Google Sheet.")
+            return sh
+        except APIError as e:
+            if e.response.status_code in [500, 502, 503, 504]:
+                print(f"⚠️ Google Sheets API 503 Error (Attempt {i+1}/{retries}). Retrying in {backoff}s...")
+                time.sleep(backoff)
+            else:
+                raise e
+        except Exception as e:
+            print(f"⚠️ Google Sheets Error: {e}. Retrying in {backoff}s...")
+            time.sleep(backoff)
+            
+    raise Exception("Could not connect to Google Sheets after multiple retries.")
+
+# Initialize global sheet variable
+sheet = get_sheet_with_retry()
 
 
 class DriverCrashed(Exception):
@@ -57,8 +79,11 @@ def is_driver_connection_error(e: Exception) -> bool:
 
 
 def mark_manual(row):
-    sheet.update(f"I{row}", [["MANUAL"]])
-    print(f"✍️  Row {row} marked as MANUAL")
+    try:
+        sheet.update(f"I{row}", [["MANUAL"]])
+        print(f"✍️  Row {row} marked as MANUAL")
+    except Exception as e:
+        print(f"⚠️ Failed to update row {row} (Sheet Error): {e}")
 
 
 def chrome_driver():
@@ -104,31 +129,28 @@ def new_driver_with_retries(max_retries=3, backoff=5):
 
 def upload_debug_screenshot(driver, row_num, reason="error"):
     """
-    Captures a screenshot, uploads it to file.io (ephemeral hosting),
+    Captures a screenshot, uploads it to 0x0.st (more reliable),
     and prints the link to the logs for debugging.
     """
     try:
-        # Generate a unique filename using timestamp
         filename = f"debug_{row_num}_{int(time.time())}.png"
         driver.save_screenshot(filename)
         print(f"📸 Uploading screenshot for {reason}...")
         
-        # Upload to file.io (expires after 1 download or 2 weeks)
+        # Upload to 0x0.st (Returns the URL in the body)
         with open(filename, "rb") as f:
-            response = requests.post("https://file.io", files={"file": f})
+            response = requests.post("https://0x0.st", files={"file": f})
         
         if response.status_code == 200:
-            data = response.json()
-            link = data.get("link")
+            link = response.text.strip()
             print(f"🔗 SCREENSHOT LINK ({reason}): {link}")
             return link
         else:
-            print(f"❌ Screenshot upload failed: {response.text}")
+            print(f"❌ Screenshot upload failed ({response.status_code}): {response.text}")
             
     except Exception as e:
         print(f"❌ Could not capture/upload screenshot: {e}")
     finally:
-        # Clean up local file to save space
         if os.path.exists(filename):
             try:
                 os.remove(filename)
@@ -138,14 +160,8 @@ def upload_debug_screenshot(driver, row_num, reason="error"):
 
 
 def select_store_id(driver, target_store="slickdeals09-20"):
-    """
-    Clicks the Store ID dropdown and selects the target store.
-    Waits for the page refresh that occurs after selection.
-    """
     try:
         wait = WebDriverWait(driver, 10)
-        
-        # Check current selection first to avoid unnecessary refreshes
         try:
             current_label = driver.find_element(By.CSS_SELECTOR, "#menu-tab-store-id-picker + span .a-dropdown-prompt")
             if current_label.text.strip() == target_store:
@@ -160,18 +176,14 @@ def select_store_id(driver, target_store="slickdeals09-20"):
         ))
         dropdown_btn.click()
         
-        # Locate the specific option in the dropdown list
         option = wait.until(EC.element_to_be_clickable(
             (By.XPATH, f"//a[contains(@class, 'a-dropdown-link') and normalize-space(text())='{target_store}']")
         ))
         
-        # Capture current HTML element to check for staleness (page refresh)
         body = driver.find_element(By.TAG_NAME, "body")
-        
         option.click()
         print(f"✅ {target_store} clicked")
         
-        # Wait for page refresh (old body becomes stale)
         try:
             wait.until(EC.staleness_of(body))
             print("🔄 Page refresh detected after store selection.")
@@ -179,7 +191,6 @@ def select_store_id(driver, target_store="slickdeals09-20"):
             print("⚠️ Page did not refresh, but option was clicked.")
 
         return True
-
     except Exception as e:
         print(f"⚠️ Could not select Store ID '{target_store}': {e}")
         return False
@@ -243,10 +254,8 @@ def amazon_login(driver, email, password, timeout=30):
         print("✅ Login successful. Ready to process rows.")
         return True
     except Exception as e:
-        # === UPDATE: Added Screenshot Logic Here ===
         print(f"❌ Error during login automation: {e}")
-        upload_debug_screenshot(driver, "LOGIN_FAIL", "Login_Crash") 
-        # ===========================================
+        upload_debug_screenshot(driver, "LOGIN_FAIL", "Login_Crash")
         if is_driver_connection_error(e):
             raise DriverCrashed(str(e))
         return False
@@ -267,7 +276,6 @@ def ensure_amazon_session(driver, email, password):
             print("🔐 Amazon session active.")
             logged_in = True
         
-        # If we are logged in, ensure the correct store ID is selected
         if logged_in:
             select_store_id(driver, "slickdeals09-20")
 
@@ -275,9 +283,7 @@ def ensure_amazon_session(driver, email, password):
         
     except Exception as e:
         print(f"🔐 Amazon session check failed, attempting login... ({e})")
-        # === UPDATE: Added Screenshot Logic Here ===
         upload_debug_screenshot(driver, "SESSION_FAIL", "Session_Check_Crash")
-        # ===========================================
         if is_driver_connection_error(e):
             raise DriverCrashed(str(e))
         
@@ -330,16 +336,6 @@ def get_commission_texts(driver, max_wait=45):
 def extract_rate(txt):
     m = re.search(r"([\d]+(?:\.\d+)?)", txt or "")
     return float(m.group(1)) if m else 0.0
-
-
-OUTCLICK_SELECTORS = [
-    "a.dealDetailsOutclickButton",
-    "a.dealCardCTALink",
-    "a[data-role='outclick']",
-    "a[data-tracking*='outclick']",
-    "a[href*='/f/redirect']",
-    "a[href*='amazon.']",
-]
 
 
 def decode_redirect(url):
@@ -641,56 +637,62 @@ def process_row(driver, row_num, thread_url):
 
 
 def retry_manual_rows(driver):
-    col_b = sheet.col_values(2)
-    col_i = sheet.col_values(9)
-    max_len = len(col_b)
-    col_i += [""] * (max_len - len(col_i))
+    try:
+        col_b = sheet.col_values(2)
+        col_i = sheet.col_values(9)
+        max_len = len(col_b)
+        col_i += [""] * (max_len - len(col_i))
 
-    manual_rows = []
-    for row_num in range(2, max_len + 1):
-        url = (col_b[row_num - 1] or "").strip()
-        commission = (col_i[row_num - 1] or "").strip().upper()
-        if url and commission == "MANUAL":
-            manual_rows.append((row_num, url))
+        manual_rows = []
+        for row_num in range(2, max_len + 1):
+            url = (col_b[row_num - 1] or "").strip()
+            commission = (col_i[row_num - 1] or "").strip().upper()
+            if url and commission == "MANUAL":
+                manual_rows.append((row_num, url))
 
-    if not manual_rows:
-        print("✅ No MANUAL rows to retry.")
-        return
+        if not manual_rows:
+            print("✅ No MANUAL rows to retry.")
+            return
 
-    print(f"🔁 Retrying {len(manual_rows)} MANUAL rows.")
-    clear_updates = [{"range": f"I{row_num}", "values": [[""]]} for row_num, _ in manual_rows]
-    sheet.batch_update(clear_updates)
+        print(f"🔁 Retrying {len(manual_rows)} MANUAL rows.")
+        clear_updates = [{"range": f"I{row_num}", "values": [[""]]} for row_num, _ in manual_rows]
+        sheet.batch_update(clear_updates)
 
-    updates = []
-    processed = 0
+        updates = []
+        processed = 0
 
-    for row_num, thread_url in manual_rows:
-        try:
-            total_pct = process_row(driver, row_num, thread_url)
-        except DriverCrashed as e:
-            print(f"💥 Driver crashed during MANUAL retry at row {row_num}: {e}")
-            raise
+        for row_num, thread_url in manual_rows:
+            try:
+                total_pct = process_row(driver, row_num, thread_url)
+            except DriverCrashed as e:
+                print(f"💥 Driver crashed during MANUAL retry at row {row_num}: {e}")
+                raise
 
-        if total_pct is None:
-            mark_manual(row_num)
-        elif total_pct == "400 Error":
-            updates.append({"range": f"I{row_num}", "values": [["400 Error"]]})
-        elif total_pct == "NON-AMAZON":
-            updates.append({"range": f"I{row_num}", "values": [["NON-AMAZON"]]})
-        else:
-            updates.append({"range": f"I{row_num}", "values": [[total_pct]]})
+            if total_pct is None:
+                mark_manual(row_num)
+            elif total_pct == "400 Error":
+                updates.append({"range": f"I{row_num}", "values": [["400 Error"]]})
+            elif total_pct == "NON-AMAZON":
+                updates.append({"range": f"I{row_num}", "values": [["NON-AMAZON"]]})
+            else:
+                updates.append({"range": f"I{row_num}", "values": [[total_pct]]})
 
-        processed += 1
-        if processed % 10 == 0 and updates:
+            processed += 1
+            if processed % 10 == 0 and updates:
+                sheet.batch_update(updates)
+                print(f"✅ Saved MANUAL retry batch after {processed} threads.")
+                updates = []
+
+            time.sleep(random.uniform(0.6, 1.2))
+
+        if updates:
             sheet.batch_update(updates)
-            print(f"✅ Saved MANUAL retry batch after {processed} threads.")
-            updates = []
+            print("✅ Finished retry pass for MANUAL rows.")
 
-        time.sleep(random.uniform(0.6, 1.2))
-
-    if updates:
-        sheet.batch_update(updates)
-        print("✅ Finished retry pass for MANUAL rows.")
+    except APIError as e:
+        print(f"⚠️ Google Sheets API Error during MANUAL retry: {e}")
+    except Exception as e:
+        print(f"⚠️ Unexpected error during MANUAL retry: {e}")
 
 
 if __name__ == "__main__":
