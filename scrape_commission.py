@@ -18,6 +18,7 @@ from selenium.common.exceptions import (
     NoSuchWindowException,
     WebDriverException,
     SessionNotCreatedException,
+    StaleElementReferenceException,
 )
 import gspread
 from google.oauth2.service_account import Credentials
@@ -99,6 +100,56 @@ def new_driver_with_retries(max_retries=3, backoff=5):
     raise DriverCrashed(f"Could not start Chrome after {max_retries} attempts: {last_exc}")
 
 
+/* === HELPERS === */
+
+def select_store_id(driver, target_store="slickdeals09-20"):
+    """
+    Clicks the Store ID dropdown and selects the target store.
+    Waits for the page refresh that occurs after selection.
+    """
+    try:
+        wait = WebDriverWait(driver, 10)
+        
+        # Check current selection first to avoid unnecessary refreshes
+        try:
+            current_label = driver.find_element(By.CSS_SELECTOR, "#menu-tab-store-id-picker + span .a-dropdown-prompt")
+            if current_label.text.strip() == target_store:
+                print(f"✅ Store ID already set to {target_store}")
+                return True
+        except Exception:
+            pass
+
+        print("📂 Attempting to select Store ID...")
+        dropdown_btn = wait.until(EC.element_to_be_clickable(
+            (By.CSS_SELECTOR, "#menu-tab-store-id-picker + span .a-button-text")
+        ))
+        dropdown_btn.click()
+        
+        # Locate the specific option in the dropdown list
+        option = wait.until(EC.element_to_be_clickable(
+            (By.XPATH, f"//a[contains(@class, 'a-dropdown-link') and normalize-space(text())='{target_store}']")
+        ))
+        
+        # Capture current HTML element to check for staleness (page refresh)
+        body = driver.find_element(By.TAG_NAME, "body")
+        
+        option.click()
+        print(f"✅ {target_store} clicked")
+        
+        # Wait for page refresh (old body becomes stale)
+        try:
+            wait.until(EC.staleness_of(body))
+            print("🔄 Page refresh detected after store selection.")
+        except TimeoutException:
+            print("⚠️ Page did not refresh, but option was clicked.")
+
+        return True
+
+    except Exception as e:
+        print(f"⚠️ Could not select Store ID '{target_store}': {e}")
+        return False
+
+
 def amazon_login(driver, email, password, timeout=30):
     try:
         wait = WebDriverWait(driver, timeout)
@@ -167,18 +218,32 @@ def ensure_amazon_session(driver, email, password):
     try:
         driver.get("https://affiliate-program.amazon.com/home")
         time.sleep(1)
+        
+        logged_in = False
         if "signin" in driver.current_url.lower() or driver.find_elements(
             By.CSS_SELECTOR, "a.ac-creatorhub-header-item-login-button"
         ):
             print("🔐 Amazon session not active, logging in...")
-            return amazon_login(driver, email, password, timeout=45)
-        print("🔐 Amazon session active.")
-        return True
+            logged_in = amazon_login(driver, email, password, timeout=45)
+        else:
+            print("🔐 Amazon session active.")
+            logged_in = True
+        
+        # If we are logged in, ensure the correct store ID is selected
+        if logged_in:
+            select_store_id(driver, "slickdeals09-20")
+
+        return logged_in
+        
     except Exception as e:
         print(f"🔐 Amazon session check failed, attempting login... ({e})")
         if is_driver_connection_error(e):
             raise DriverCrashed(str(e))
-        return amazon_login(driver, email, password, timeout=45)
+        
+        success = amazon_login(driver, email, password, timeout=45)
+        if success:
+             select_store_id(driver, "slickdeals09-20")
+        return success
 
 
 def js_commission_probe(driver):
