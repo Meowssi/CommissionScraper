@@ -137,9 +137,14 @@ def upload_debug_screenshot(driver, row_num, reason="error"):
         driver.save_screenshot(filename)
         print(f"📸 Uploading screenshot for {reason}...")
         
-        # Upload to 0x0.st (Returns the URL in the body)
+        # === FIX: Added User-Agent to bypass 403 block ===
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+        }
+        
         with open(filename, "rb") as f:
-            response = requests.post("https://0x0.st", files={"file": f})
+            response = requests.post("https://0x0.st", files={"file": f}, headers=headers)
+        # =================================================
         
         if response.status_code == 200:
             link = response.text.strip()
