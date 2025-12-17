@@ -129,39 +129,75 @@ def new_driver_with_retries(max_retries=3, backoff=5):
 
 def upload_debug_screenshot(driver, row_num, reason="error"):
     """
-    Captures a screenshot, uploads it to 0x0.st (more reliable),
-    and prints the link to the logs for debugging.
+    Attempts to upload a screenshot to multiple services (0x0, file.io, transfer.sh)
+    until one succeeds. This ensures we get a link even if one service blocks us.
     """
+    filename = f"debug_{row_num}_{int(time.time())}.png"
+    
     try:
-        filename = f"debug_{row_num}_{int(time.time())}.png"
         driver.save_screenshot(filename)
-        print(f"📸 Uploading screenshot for {reason}...")
-        
-        # === FIX: Added User-Agent to bypass 403 block ===
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
-        }
-        
-        with open(filename, "rb") as f:
-            response = requests.post("https://0x0.st", files={"file": f}, headers=headers)
-        # =================================================
-        
-        if response.status_code == 200:
-            link = response.text.strip()
-            print(f"🔗 SCREENSHOT LINK ({reason}): {link}")
-            return link
-        else:
-            print(f"❌ Screenshot upload failed ({response.status_code}): {response.text}")
-            
+        print(f"📸 Captured screenshot: {filename} ({reason})")
     except Exception as e:
-        print(f"❌ Could not capture/upload screenshot: {e}")
-    finally:
-        if os.path.exists(filename):
-            try:
-                os.remove(filename)
-            except OSError:
-                pass
-    return None
+        print(f"❌ Failed to capture screenshot: {e}")
+        return None
+
+    # Modern User-Agent to bypass simple blockers
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    }
+
+    link = None
+
+    # Strategy 1: 0x0.st
+    if not link:
+        try:
+            print("   Attempting upload to 0x0.st...")
+            with open(filename, "rb") as f:
+                r = requests.post("https://0x0.st", files={"file": f}, headers=headers)
+            if r.status_code == 200:
+                link = r.text.strip()
+                print(f"🔗 SCREENSHOT LINK (0x0): {link}")
+            else:
+                print(f"   ⚠️ 0x0.st failed: {r.status_code}")
+        except Exception as e:
+            print(f"   ⚠️ 0x0.st error: {e}")
+
+    # Strategy 2: file.io
+    if not link:
+        try:
+            print("   Attempting upload to file.io...")
+            with open(filename, "rb") as f:
+                r = requests.post("https://file.io", files={"file": f}, headers=headers)
+            if r.status_code == 200:
+                link = r.json().get("link")
+                print(f"🔗 SCREENSHOT LINK (file.io): {link}")
+            else:
+                print(f"   ⚠️ file.io failed: {r.status_code} - {r.text[:50]}...")
+        except Exception as e:
+            print(f"   ⚠️ file.io error: {e}")
+
+    # Strategy 3: transfer.sh
+    if not link:
+        try:
+            print("   Attempting upload to transfer.sh...")
+            with open(filename, "rb") as f:
+                r = requests.put(f"https://transfer.sh/{filename}", data=f, headers=headers)
+            if r.status_code == 200:
+                link = r.text.strip()
+                print(f"🔗 SCREENSHOT LINK (transfer.sh): {link}")
+            else:
+                print(f"   ⚠️ transfer.sh failed: {r.status_code}")
+        except Exception as e:
+            print(f"   ⚠️ transfer.sh error: {e}")
+
+    # Cleanup
+    if os.path.exists(filename):
+        try:
+            os.remove(filename)
+        except OSError:
+            pass
+
+    return link
 
 
 def select_store_id(driver, target_store="slickdeals09-20"):
