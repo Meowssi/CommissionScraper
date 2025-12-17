@@ -1,5 +1,4 @@
 import os, re, time, random, json
-# Removed 'requests' to fix the dependency warning since we don't need it anymore
 from urllib.parse import urlparse, parse_qs, unquote
 import warnings
 
@@ -20,11 +19,9 @@ from selenium.common.exceptions import (
     WebDriverException,
     SessionNotCreatedException,
     StaleElementReferenceException,
-    InvalidArgumentException
 )
 import gspread
 from google.oauth2.service_account import Credentials
-from gspread.exceptions import APIError
 
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 
@@ -40,30 +37,9 @@ CHROMEDRIVER_PATH = os.environ.get("CHROMEDRIVER_PATH", "/usr/bin/chromedriver")
 PROFILE_ROOT = os.environ.get("CHROME_USER_DATA_DIR", "/tmp/chrome-profile-root")
 os.makedirs(PROFILE_ROOT, exist_ok=True)
 
-# === INITIALIZATION WITH RETRY ===
-def get_sheet_with_retry(retries=5, backoff=10):
-    creds = Credentials.from_service_account_info(SERVICE_ACCOUNT_INFO, scopes=SCOPES)
-    gc = gspread.authorize(creds)
-    
-    for i in range(retries):
-        try:
-            sh = gc.open_by_key(SPREADSHEET_ID).worksheet(SHEET_NAME)
-            print("✅ Connected to Google Sheet.")
-            return sh
-        except APIError as e:
-            if e.response.status_code in [500, 502, 503, 504]:
-                print(f"⚠️ Google Sheets API 503 Error (Attempt {i+1}/{retries}). Retrying in {backoff}s...")
-                time.sleep(backoff)
-            else:
-                raise e
-        except Exception as e:
-            print(f"⚠️ Google Sheets Error: {e}. Retrying in {backoff}s...")
-            time.sleep(backoff)
-            
-    raise Exception("Could not connect to Google Sheets after multiple retries.")
-
-# Initialize global sheet variable
-sheet = get_sheet_with_retry()
+creds = Credentials.from_service_account_info(SERVICE_ACCOUNT_INFO, scopes=SCOPES)
+gc = gspread.authorize(creds)
+sheet = gc.open_by_key(SPREADSHEET_ID).worksheet(SHEET_NAME)
 
 
 class DriverCrashed(Exception):
@@ -81,11 +57,8 @@ def is_driver_connection_error(e: Exception) -> bool:
 
 
 def mark_manual(row):
-    try:
-        sheet.update(f"I{row}", [["MANUAL"]])
-        print(f"✍️  Row {row} marked as MANUAL")
-    except Exception as e:
-        print(f"⚠️ Failed to update row {row} (Sheet Error): {e}")
+    sheet.update(f"I{row}", [["MANUAL"]])
+    print(f"✍️  Row {row} marked as MANUAL")
 
 
 def chrome_driver():
@@ -102,7 +75,7 @@ def chrome_driver():
     options.add_argument("--log-level=3")
     options.add_argument("--remote-debugging-port=9222")
     
-    # Standard User Agent to look less like a bot
+    # Standard User Agent to look less like a bot (Added this one line for safety)
     options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
 
     profile_dir = os.path.join(
@@ -127,19 +100,19 @@ def new_driver_with_retries(max_retries=3, backoff=5):
             last_exc = e
             print(f"💥 WebDriverException on startup; retrying in {backoff}s... {e}")
             time.sleep(backoff)
-    raise DriverCrashed(f"Could not start Chrome after {max_retries} attempts: {last_exc}")
+    raise DriverCrashed(
+        f"Could not start Chrome after {max_retries} attempts: {last_exc}"
+    )
 
 
-# === COOKIE HELPER ===
+# === COOKIE HELPER (Added this) ===
 
 def inject_cookies_from_env(driver):
     """
-    Reads the AMAZON_COOKIES environment variable and injects them into the browser.
-    This allows bypassing login/captcha by using a pre-authenticated session.
+    Reads the AMAZON_COOKIES environment variable and injects them.
     """
     env_cookies = os.environ.get("AMAZON_COOKIES")
     if not env_cookies:
-        print("ℹ️ No AMAZON_COOKIES found in environment. Proceeding with standard login...")
         return False
 
     print("🍪 AMAZON_COOKIES found! Attempting injection...")
@@ -153,16 +126,15 @@ def inject_cookies_from_env(driver):
         driver.delete_all_cookies()
         
         for cookie in cookies:
-            # Clean up cookie fields that Selenium doesn't like
-            if 'sameSite' in cookie and cookie['sameSite'] not in ["Strict", "Lax", "None"]:
-                del cookie['sameSite']
+            if 'sameSite' in cookie:
+                if cookie['sameSite'] not in ["Strict", "Lax", "None"]:
+                    del cookie['sameSite']
             if 'storeId' in cookie:
                 del cookie['storeId']
                 
             try:
                 driver.add_cookie(cookie)
             except Exception:
-                # Ignore specific cookie errors (domain mismatch etc)
                 pass
                 
         print("✅ Cookies injected. Refreshing page...")
@@ -174,7 +146,7 @@ def inject_cookies_from_env(driver):
             print("🎉 Session restored via Cookies! Login bypassed.")
             return True
         else:
-            print("⚠️ Cookie injection failed or session expired. Falling back to login...")
+            print("⚠️ Cookie injection failed. Falling back to login...")
             return False
             
     except Exception as e:
@@ -182,13 +154,16 @@ def inject_cookies_from_env(driver):
         return False
 
 
-# === STANDARD HELPERS ===
+# === HELPERS ===
+
 
 def select_store_id(driver, target_store="slickdeals09-20"):
     try:
         wait = WebDriverWait(driver, 10)
         try:
-            current_label = driver.find_element(By.CSS_SELECTOR, "#menu-tab-store-id-picker + span .a-dropdown-prompt")
+            current_label = driver.find_element(
+                By.CSS_SELECTOR, "#menu-tab-store-id-picker + span .a-dropdown-prompt"
+            )
             if current_label.text.strip() == target_store:
                 print(f"✅ Store ID already set to {target_store}")
                 return True
@@ -196,19 +171,27 @@ def select_store_id(driver, target_store="slickdeals09-20"):
             pass
 
         print("📂 Attempting to select Store ID...")
-        dropdown_btn = wait.until(EC.element_to_be_clickable(
-            (By.CSS_SELECTOR, "#menu-tab-store-id-picker + span .a-button-text")
-        ))
+        dropdown_btn = wait.until(
+            EC.element_to_be_clickable(
+                (By.CSS_SELECTOR, "#menu-tab-store-id-picker + span .a-button-text")
+            )
+        )
         dropdown_btn.click()
-        
-        option = wait.until(EC.element_to_be_clickable(
-            (By.XPATH, f"//a[contains(@class, 'a-dropdown-link') and normalize-space(text())='{target_store}']")
-        ))
-        
+
+        option = wait.until(
+            EC.element_to_be_clickable(
+                (
+                    By.XPATH,
+                    f"//a[contains(@class, 'a-dropdown-link') and normalize-space(text())='{target_store}']",
+                )
+            )
+        )
+
         body = driver.find_element(By.TAG_NAME, "body")
+
         option.click()
         print(f"✅ {target_store} clicked")
-        
+
         try:
             wait.until(EC.staleness_of(body))
             print("🔄 Page refresh detected after store selection.")
@@ -216,6 +199,7 @@ def select_store_id(driver, target_store="slickdeals09-20"):
             print("⚠️ Page did not refresh, but option was clicked.")
 
         return True
+
     except Exception as e:
         print(f"⚠️ Could not select Store ID '{target_store}': {e}")
         return False
@@ -228,13 +212,21 @@ def amazon_login(driver, email, password, timeout=30):
         time.sleep(1)
 
         if "/home" in driver.current_url.lower():
-            if driver.find_elements(By.CSS_SELECTOR, "a.ac-creatorhub-header-item-login-button"):
-                pass
-            else:
+            try:
+                if driver.find_elements(
+                    By.CSS_SELECTOR, "a.ac-creatorhub-header-item-login-button"
+                ):
+                    pass
+                else:
+                    print("✅ Already signed in (home).")
+                    return True
+            except Exception:
                 print("✅ Already signed in (home).")
                 return True
 
-        if "signin" in driver.current_url.lower() or driver.find_elements(By.ID, "ap_email"):
+        if "signin" in driver.current_url.lower() or driver.find_elements(
+            By.ID, "ap_email"
+        ):
             print("🔐 On Amazon sign-in form.")
         else:
             try:
@@ -247,11 +239,13 @@ def amazon_login(driver, email, password, timeout=30):
                 print("✅ Clicked Sign In link.")
             except TimeoutException:
                 if "/home" in driver.current_url.lower():
-                    print("✅ Already signed in.")
+                    print("✅ Already signed in (no Sign In button).")
                     return True
 
         try:
-            email_input = wait.until(EC.visibility_of_element_located((By.ID, "ap_email")))
+            email_input = wait.until(
+                EC.visibility_of_element_located((By.ID, "ap_email"))
+            )
             email_input.clear()
             email_input.send_keys(email)
             print("✅ Entered email.")
@@ -261,30 +255,23 @@ def amazon_login(driver, email, password, timeout=30):
             pass
 
         try:
-            password_input = wait.until(EC.visibility_of_element_located((By.ID, "ap_password")))
+            password_input = wait.until(
+                EC.visibility_of_element_located((By.ID, "ap_password"))
+            )
             password_input.clear()
             password_input.send_keys(password)
             print("✅ Entered password.")
-            sign_in_btn = wait.until(EC.element_to_be_clickable((By.ID, "signInSubmit")))
+            sign_in_btn = wait.until(
+                EC.element_to_be_clickable((By.ID, "signInSubmit"))
+            )
             driver.execute_script("arguments[0].click();", sign_in_btn)
             print("✅ Clicked Sign In.")
         except TimeoutException:
             pass
 
-        # === CHECK FOR CAPTCHA ===
-        time.sleep(2)
-        if "characters you see" in driver.page_source.lower() or "puzzle" in driver.page_source.lower():
-            print("🚨 CAPTCHA DETECTED. Automatic login failed.")
-            print("👉 ACTION REQUIRED: Please log in locally, get your cookies, and add 'AMAZON_COOKIES' to Render Env Vars.")
-            return False
-
-        try:
-            wait.until(EC.url_contains("/home"))
-            print("✅ Login successful. Ready to process rows.")
-            return True
-        except TimeoutException:
-            return False
-
+        wait.until(EC.url_contains("/home"))
+        print("✅ Login successful. Ready to process rows.")
+        return True
     except Exception as e:
         print(f"❌ Error during login automation: {e}")
         if is_driver_connection_error(e):
@@ -293,16 +280,17 @@ def amazon_login(driver, email, password, timeout=30):
 
 
 def ensure_amazon_session(driver, email, password):
-    # 1. Try to inject cookies first (Bypass login)
+    # === COOKIE INJECTION START ===
+    # This tries to skip login using cookies first
     if inject_cookies_from_env(driver):
-        if select_store_id(driver, "slickdeals09-20"):
-            return True
+        select_store_id(driver, "slickdeals09-20")
+        return True
+    # === COOKIE INJECTION END ===
 
-    # 2. Fallback to standard login
     try:
         driver.get("https://affiliate-program.amazon.com/home")
         time.sleep(1)
-        
+
         logged_in = False
         if "signin" in driver.current_url.lower() or driver.find_elements(
             By.CSS_SELECTOR, "a.ac-creatorhub-header-item-login-button"
@@ -312,18 +300,21 @@ def ensure_amazon_session(driver, email, password):
         else:
             print("🔐 Amazon session active.")
             logged_in = True
-        
+
         if logged_in:
             select_store_id(driver, "slickdeals09-20")
 
         return logged_in
-        
+
     except Exception as e:
-        print(f"🔐 Amazon session check failed... ({e})")
+        print(f"🔐 Amazon session check failed, attempting login... ({e})")
         if is_driver_connection_error(e):
             raise DriverCrashed(str(e))
-        
-        return False
+
+        success = amazon_login(driver, email, password, timeout=45)
+        if success:
+            select_store_id(driver, "slickdeals09-20")
+        return success
 
 
 def js_commission_probe(driver):
@@ -369,6 +360,16 @@ def get_commission_texts(driver, max_wait=45):
 def extract_rate(txt):
     m = re.search(r"([\d]+(?:\.\d+)?)", txt or "")
     return float(m.group(1)) if m else 0.0
+
+
+OUTCLICK_SELECTORS = [
+    "a.dealDetailsOutclickButton",
+    "a.dealCardCTALink",
+    "a[data-role='outclick']",
+    "a[data-tracking*='outclick']",
+    "a[href*='/f/redirect']",
+    "a[href*='amazon.']",
+]
 
 
 def decode_redirect(url):
@@ -646,7 +647,9 @@ def process_row(driver, row_num, thread_url):
         except (NoSuchWindowException, WebDriverException) as e:
             print(f"💥 Browser error: {e}")
             if is_driver_connection_error(e):
-                print("💥 Detected WebDriver connection crash (NoSuchWindow/WebDriverException).")
+                print(
+                    "💥 Detected WebDriver connection crash (NoSuchWindow/WebDriverException)."
+                )
                 raise DriverCrashed(str(e))
             time.sleep(2)
             continue
@@ -654,7 +657,9 @@ def process_row(driver, row_num, thread_url):
         except Exception as e:
             print(f"❌ Unexpected error row {row_num}: {e}")
             if is_driver_connection_error(e):
-                print("💥 Detected WebDriver connection crash (HTTPConnectionPool/DevTools/etc).")
+                print(
+                    "💥 Detected WebDriver connection crash (HTTPConnectionPool/DevTools/etc)."
+                )
                 raise DriverCrashed(str(e))
             time.sleep(2)
             continue
@@ -663,62 +668,58 @@ def process_row(driver, row_num, thread_url):
 
 
 def retry_manual_rows(driver):
-    try:
-        col_b = sheet.col_values(2)
-        col_i = sheet.col_values(9)
-        max_len = len(col_b)
-        col_i += [""] * (max_len - len(col_i))
+    col_b = sheet.col_values(2)
+    col_i = sheet.col_values(9)
+    max_len = len(col_b)
+    col_i += [""] * (max_len - len(col_i))
 
-        manual_rows = []
-        for row_num in range(2, max_len + 1):
-            url = (col_b[row_num - 1] or "").strip()
-            commission = (col_i[row_num - 1] or "").strip().upper()
-            if url and commission == "MANUAL":
-                manual_rows.append((row_num, url))
+    manual_rows = []
+    for row_num in range(2, max_len + 1):
+        url = (col_b[row_num - 1] or "").strip()
+        commission = (col_i[row_num - 1] or "").strip().upper()
+        if url and commission == "MANUAL":
+            manual_rows.append((row_num, url))
 
-        if not manual_rows:
-            print("✅ No MANUAL rows to retry.")
-            return
+    if not manual_rows:
+        print("✅ No MANUAL rows to retry.")
+        return
 
-        print(f"🔁 Retrying {len(manual_rows)} MANUAL rows.")
-        clear_updates = [{"range": f"I{row_num}", "values": [[""]]} for row_num, _ in manual_rows]
-        sheet.batch_update(clear_updates)
+    print(f"🔁 Retrying {len(manual_rows)} MANUAL rows.")
+    clear_updates = [
+        {"range": f"I{row_num}", "values": [[""]]} for row_num, _ in manual_rows
+    ]
+    sheet.batch_update(clear_updates)
 
-        updates = []
-        processed = 0
+    updates = []
+    processed = 0
 
-        for row_num, thread_url in manual_rows:
-            try:
-                total_pct = process_row(driver, row_num, thread_url)
-            except DriverCrashed as e:
-                print(f"💥 Driver crashed during MANUAL retry at row {row_num}: {e}")
-                raise
+    for row_num, thread_url in manual_rows:
+        try:
+            total_pct = process_row(driver, row_num, thread_url)
+        except DriverCrashed as e:
+            print(f"💥 Driver crashed during MANUAL retry at row {row_num}: {e}")
+            raise
 
-            if total_pct is None:
-                mark_manual(row_num)
-            elif total_pct == "400 Error":
-                updates.append({"range": f"I{row_num}", "values": [["400 Error"]]})
-            elif total_pct == "NON-AMAZON":
-                updates.append({"range": f"I{row_num}", "values": [["NON-AMAZON"]]})
-            else:
-                updates.append({"range": f"I{row_num}", "values": [[total_pct]]})
+        if total_pct is None:
+            mark_manual(row_num)
+        elif total_pct == "400 Error":
+            updates.append({"range": f"I{row_num}", "values": [["400 Error"]]})
+        elif total_pct == "NON-AMAZON":
+            updates.append({"range": f"I{row_num}", "values": [["NON-AMAZON"]]})
+        else:
+            updates.append({"range": f"I{row_num}", "values": [[total_pct]]})
 
-            processed += 1
-            if processed % 10 == 0 and updates:
-                sheet.batch_update(updates)
-                print(f"✅ Saved MANUAL retry batch after {processed} threads.")
-                updates = []
-
-            time.sleep(random.uniform(0.6, 1.2))
-
-        if updates:
+        processed += 1
+        if processed % 10 == 0 and updates:
             sheet.batch_update(updates)
-            print("✅ Finished retry pass for MANUAL rows.")
+            print(f"✅ Saved MANUAL retry batch after {processed} threads.")
+            updates = []
 
-    except APIError as e:
-        print(f"⚠️ Google Sheets API Error during MANUAL retry: {e}")
-    except Exception as e:
-        print(f"⚠️ Unexpected error during MANUAL retry: {e}")
+        time.sleep(random.uniform(0.6, 1.2))
+
+    if updates:
+        sheet.batch_update(updates)
+        print("✅ Finished retry pass for MANUAL rows.")
 
 
 if __name__ == "__main__":
@@ -782,17 +783,25 @@ if __name__ == "__main__":
                     try:
                         total_pct = process_row(driver, row_num, thread_url)
                     except DriverCrashed as e:
-                        print(f"💥 Driver crashed during main rows at row {row_num}: {e}")
+                        print(
+                            f"💥 Driver crashed during main rows at row {row_num}: {e}"
+                        )
                         raise
 
                     if total_pct is None:
                         mark_manual(row_num)
                     elif total_pct == "400 Error":
-                        updates.append({"range": f"I{row_num}", "values": [["400 Error"]]})
+                        updates.append(
+                            {"range": f"I{row_num}", "values": [["400 Error"]]}
+                        )
                     elif total_pct == "NON-AMAZON":
-                        updates.append({"range": f"I{row_num}", "values": [["NON-AMAZON"]]})
+                        updates.append(
+                            {"range": f"I{row_num}", "values": [["NON-AMAZON"]]}
+                        )
                     else:
-                        updates.append({"range": f"I{row_num}", "values": [[total_pct]]})
+                        updates.append(
+                            {"range": f"I{row_num}", "values": [[total_pct]]}
+                        )
 
                     processed += 1
                     if processed % 10 == 0 and updates:
