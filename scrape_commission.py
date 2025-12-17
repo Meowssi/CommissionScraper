@@ -100,7 +100,7 @@ def new_driver_with_retries(max_retries=3, backoff=5):
     raise DriverCrashed(f"Could not start Chrome after {max_retries} attempts: {last_exc}")
 
 
-/* === HELPERS === */
+# === HELPERS ===
 
 def select_store_id(driver, target_store="slickdeals09-20"):
     """
