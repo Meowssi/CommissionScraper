@@ -15,3 +15,5 @@ services:
         sync: false
       - key: AMZ_PASS
         sync: false
+      - key: AMAZON_COOKIES
+        sync: false
