@@ -5,6 +5,8 @@ services:
     plan: starter
     autoDeploy: true
     envVars:
+      - key: PYTHONUNBUFFERED
+        value: true
       - key: GOOGLE_SERVICE_ACCOUNT_JSON
         sync: false
       - key: SPREADSHEET_ID
