@@ -19,3 +19,5 @@ services:
         sync: false
       - key: AMAZON_COOKIES
         sync: false
+      - key: USER_AGENT
+        sync: false
