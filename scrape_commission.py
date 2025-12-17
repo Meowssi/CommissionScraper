@@ -127,68 +127,80 @@ def new_driver_with_retries(max_retries=3, backoff=5):
 
 # === HELPERS ===
 
+def log_page_debug_info(driver, reason="error"):
+    """
+    Prints the text content of the current page to the logs.
+    This bypasses the need for screenshots to detect CAPTCHAs or OTP requests.
+    """
+    print(f"\n{'='*20} DEBUG: PAGE TEXT ({reason}) {'='*20}")
+    try:
+        # 1. Get current URL
+        print(f"📍 Current URL: {driver.current_url}")
+        
+        # 2. Dump visible text
+        body_text = driver.find_element(By.TAG_NAME, "body").text
+        clean_text = re.sub(r'\n+', '\n', body_text).strip()
+        print(f"📝 Page Content (First 1000 chars):\n{clean_text[:1000]}")
+        
+        # 3. Analyze for blockers
+        lower_text = clean_text.lower()
+        if "characters you see" in lower_text or "type the characters" in lower_text:
+            print("\n🚨 DIAGNOSIS: Amazon is showing a CAPTCHA.")
+        elif "one time password" in lower_text or "otp" in lower_text:
+            print("\n🚨 DIAGNOSIS: Amazon is asking for 2FA/OTP.")
+        elif "approve" in lower_text and "notification" in lower_text:
+            print("\n🚨 DIAGNOSIS: Amazon asking for Mobile App Approval.")
+        elif "password is incorrect" in lower_text:
+            print("\n🚨 DIAGNOSIS: Incorrect Password.")
+            
+    except Exception as e:
+        print(f"❌ Could not dump page text: {e}")
+    print("="*60 + "\n")
+
+
 def upload_debug_screenshot(driver, row_num, reason="error"):
     """
-    Attempts to upload a screenshot to multiple services (0x0, file.io, transfer.sh)
-    until one succeeds. This ensures we get a link even if one service blocks us.
+    Attempts to upload to catbox.moe (permissive) or 0x0.st.
     """
+    # FIRST: Log text content (guaranteed to work)
+    log_page_debug_info(driver, reason)
+
     filename = f"debug_{row_num}_{int(time.time())}.png"
-    
     try:
         driver.save_screenshot(filename)
-        print(f"📸 Captured screenshot: {filename} ({reason})")
-    except Exception as e:
-        print(f"❌ Failed to capture screenshot: {e}")
+    except Exception:
         return None
 
-    # Modern User-Agent to bypass simple blockers
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-    }
+    # Random User-Agent
+    user_agents = [
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0 Safari/537.36",
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) Chrome/119.0.0.0 Safari/537.36"
+    ]
+    headers = {"User-Agent": random.choice(user_agents)}
 
     link = None
 
-    # Strategy 1: 0x0.st
+    # Strategy 1: Catbox.moe (Very permissive)
+    try:
+        with open(filename, "rb") as f:
+            data = {'reqtype': 'fileupload', 'userhash': ''}
+            r = requests.post("https://catbox.moe/user/api.php", data=data, files={'fileToUpload': f}, headers=headers)
+        if r.status_code == 200:
+            link = r.text.strip()
+            print(f"🔗 SCREENSHOT LINK (Catbox): {link}")
+    except Exception:
+        pass
+
+    # Strategy 2: 0x0.st (Backup)
     if not link:
         try:
-            print("   Attempting upload to 0x0.st...")
             with open(filename, "rb") as f:
                 r = requests.post("https://0x0.st", files={"file": f}, headers=headers)
             if r.status_code == 200:
                 link = r.text.strip()
                 print(f"🔗 SCREENSHOT LINK (0x0): {link}")
-            else:
-                print(f"   ⚠️ 0x0.st failed: {r.status_code}")
-        except Exception as e:
-            print(f"   ⚠️ 0x0.st error: {e}")
-
-    # Strategy 2: file.io
-    if not link:
-        try:
-            print("   Attempting upload to file.io...")
-            with open(filename, "rb") as f:
-                r = requests.post("https://file.io", files={"file": f}, headers=headers)
-            if r.status_code == 200:
-                link = r.json().get("link")
-                print(f"🔗 SCREENSHOT LINK (file.io): {link}")
-            else:
-                print(f"   ⚠️ file.io failed: {r.status_code} - {r.text[:50]}...")
-        except Exception as e:
-            print(f"   ⚠️ file.io error: {e}")
-
-    # Strategy 3: transfer.sh
-    if not link:
-        try:
-            print("   Attempting upload to transfer.sh...")
-            with open(filename, "rb") as f:
-                r = requests.put(f"https://transfer.sh/{filename}", data=f, headers=headers)
-            if r.status_code == 200:
-                link = r.text.strip()
-                print(f"🔗 SCREENSHOT LINK (transfer.sh): {link}")
-            else:
-                print(f"   ⚠️ transfer.sh failed: {r.status_code}")
-        except Exception as e:
-            print(f"   ⚠️ transfer.sh error: {e}")
+        except Exception:
+            pass
 
     # Cleanup
     if os.path.exists(filename):
