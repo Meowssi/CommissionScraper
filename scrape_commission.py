@@ -19,6 +19,7 @@ from selenium.common.exceptions import (
     WebDriverException,
     SessionNotCreatedException,
     StaleElementReferenceException,
+    InvalidArgumentException
 )
 import gspread
 from google.oauth2.service_account import Credentials
@@ -99,6 +100,9 @@ def chrome_driver():
     options.add_argument("--disable-features=NetworkServiceInProcess")
     options.add_argument("--log-level=3")
     options.add_argument("--remote-debugging-port=9222")
+    
+    # Standard User Agent to look less like a bot
+    options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
 
     profile_dir = os.path.join(
         PROFILE_ROOT,
@@ -125,92 +129,59 @@ def new_driver_with_retries(max_retries=3, backoff=5):
     raise DriverCrashed(f"Could not start Chrome after {max_retries} attempts: {last_exc}")
 
 
-# === HELPERS ===
+# === COOKIE HELPER ===
 
-def log_page_debug_info(driver, reason="error"):
+def inject_cookies_from_env(driver):
     """
-    Prints the text content of the current page to the logs.
-    This bypasses the need for screenshots to detect CAPTCHAs or OTP requests.
+    Reads the AMAZON_COOKIES environment variable and injects them into the browser.
+    This allows bypassing login/captcha by using a pre-authenticated session.
     """
-    print(f"\n{'='*20} DEBUG: PAGE TEXT ({reason}) {'='*20}")
+    env_cookies = os.environ.get("AMAZON_COOKIES")
+    if not env_cookies:
+        print("ℹ️ No AMAZON_COOKIES found in environment. Proceeding with standard login...")
+        return False
+
+    print("🍪 AMAZON_COOKIES found! Attempting injection...")
     try:
-        # 1. Get current URL
-        print(f"📍 Current URL: {driver.current_url}")
+        cookies = json.loads(env_cookies)
         
-        # 2. Dump visible text
-        body_text = driver.find_element(By.TAG_NAME, "body").text
-        clean_text = re.sub(r'\n+', '\n', body_text).strip()
-        print(f"📝 Page Content (First 1000 chars):\n{clean_text[:1000]}")
+        # Selenium requires being on the domain to set cookies
+        driver.get("https://affiliate-program.amazon.com/home") 
+        time.sleep(1)
         
-        # 3. Analyze for blockers
-        lower_text = clean_text.lower()
-        if "characters you see" in lower_text or "type the characters" in lower_text:
-            print("\n🚨 DIAGNOSIS: Amazon is showing a CAPTCHA.")
-        elif "one time password" in lower_text or "otp" in lower_text:
-            print("\n🚨 DIAGNOSIS: Amazon is asking for 2FA/OTP.")
-        elif "approve" in lower_text and "notification" in lower_text:
-            print("\n🚨 DIAGNOSIS: Amazon asking for Mobile App Approval.")
-        elif "password is incorrect" in lower_text:
-            print("\n🚨 DIAGNOSIS: Incorrect Password.")
+        driver.delete_all_cookies()
+        
+        for cookie in cookies:
+            # Clean up cookie fields that Selenium doesn't like
+            if 'sameSite' in cookie and cookie['sameSite'] not in ["Strict", "Lax", "None"]:
+                del cookie['sameSite']
+            if 'storeId' in cookie:
+                del cookie['storeId']
+                
+            try:
+                driver.add_cookie(cookie)
+            except Exception:
+                # Ignore specific cookie errors (domain mismatch etc)
+                pass
+                
+        print("✅ Cookies injected. Refreshing page...")
+        driver.refresh()
+        time.sleep(3)
+        
+        # Verify if it worked
+        if "signin" not in driver.current_url.lower():
+            print("🎉 Session restored via Cookies! Login bypassed.")
+            return True
+        else:
+            print("⚠️ Cookie injection failed or session expired. Falling back to login...")
+            return False
             
     except Exception as e:
-        print(f"❌ Could not dump page text: {e}")
-    print("="*60 + "\n")
+        print(f"❌ Error injecting cookies: {e}")
+        return False
 
 
-def upload_debug_screenshot(driver, row_num, reason="error"):
-    """
-    Attempts to upload to catbox.moe (permissive) or 0x0.st.
-    """
-    # FIRST: Log text content (guaranteed to work)
-    log_page_debug_info(driver, reason)
-
-    filename = f"debug_{row_num}_{int(time.time())}.png"
-    try:
-        driver.save_screenshot(filename)
-    except Exception:
-        return None
-
-    # Random User-Agent
-    user_agents = [
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0 Safari/537.36",
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) Chrome/119.0.0.0 Safari/537.36"
-    ]
-    headers = {"User-Agent": random.choice(user_agents)}
-
-    link = None
-
-    # Strategy 1: Catbox.moe (Very permissive)
-    try:
-        with open(filename, "rb") as f:
-            data = {'reqtype': 'fileupload', 'userhash': ''}
-            r = requests.post("https://catbox.moe/user/api.php", data=data, files={'fileToUpload': f}, headers=headers)
-        if r.status_code == 200:
-            link = r.text.strip()
-            print(f"🔗 SCREENSHOT LINK (Catbox): {link}")
-    except Exception:
-        pass
-
-    # Strategy 2: 0x0.st (Backup)
-    if not link:
-        try:
-            with open(filename, "rb") as f:
-                r = requests.post("https://0x0.st", files={"file": f}, headers=headers)
-            if r.status_code == 200:
-                link = r.text.strip()
-                print(f"🔗 SCREENSHOT LINK (0x0): {link}")
-        except Exception:
-            pass
-
-    # Cleanup
-    if os.path.exists(filename):
-        try:
-            os.remove(filename)
-        except OSError:
-            pass
-
-    return link
-
+# === STANDARD HELPERS ===
 
 def select_store_id(driver, target_store="slickdeals09-20"):
     try:
@@ -256,13 +227,9 @@ def amazon_login(driver, email, password, timeout=30):
         time.sleep(1)
 
         if "/home" in driver.current_url.lower():
-            try:
-                if driver.find_elements(By.CSS_SELECTOR, "a.ac-creatorhub-header-item-login-button"):
-                    pass
-                else:
-                    print("✅ Already signed in (home).")
-                    return True
-            except Exception:
+            if driver.find_elements(By.CSS_SELECTOR, "a.ac-creatorhub-header-item-login-button"):
+                pass
+            else:
                 print("✅ Already signed in (home).")
                 return True
 
@@ -279,7 +246,7 @@ def amazon_login(driver, email, password, timeout=30):
                 print("✅ Clicked Sign In link.")
             except TimeoutException:
                 if "/home" in driver.current_url.lower():
-                    print("✅ Already signed in (no Sign In button).")
+                    print("✅ Already signed in.")
                     return True
 
         try:
@@ -303,18 +270,34 @@ def amazon_login(driver, email, password, timeout=30):
         except TimeoutException:
             pass
 
-        wait.until(EC.url_contains("/home"))
-        print("✅ Login successful. Ready to process rows.")
-        return True
+        # === CHECK FOR CAPTCHA ===
+        time.sleep(2)
+        if "characters you see" in driver.page_source.lower() or "puzzle" in driver.page_source.lower():
+            print("🚨 CAPTCHA DETECTED. Automatic login failed.")
+            print("👉 ACTION REQUIRED: Please log in locally, get your cookies, and add 'AMAZON_COOKIES' to Render Env Vars.")
+            return False
+
+        try:
+            wait.until(EC.url_contains("/home"))
+            print("✅ Login successful. Ready to process rows.")
+            return True
+        except TimeoutException:
+            return False
+
     except Exception as e:
         print(f"❌ Error during login automation: {e}")
-        upload_debug_screenshot(driver, "LOGIN_FAIL", "Login_Crash")
         if is_driver_connection_error(e):
             raise DriverCrashed(str(e))
         return False
 
 
 def ensure_amazon_session(driver, email, password):
+    # 1. Try to inject cookies first (Bypass login)
+    if inject_cookies_from_env(driver):
+        if select_store_id(driver, "slickdeals09-20"):
+            return True
+
+    # 2. Fallback to standard login
     try:
         driver.get("https://affiliate-program.amazon.com/home")
         time.sleep(1)
@@ -335,15 +318,11 @@ def ensure_amazon_session(driver, email, password):
         return logged_in
         
     except Exception as e:
-        print(f"🔐 Amazon session check failed, attempting login... ({e})")
-        upload_debug_screenshot(driver, "SESSION_FAIL", "Session_Check_Crash")
+        print(f"🔐 Amazon session check failed... ({e})")
         if is_driver_connection_error(e):
             raise DriverCrashed(str(e))
         
-        success = amazon_login(driver, email, password, timeout=45)
-        if success:
-             select_store_id(driver, "slickdeals09-20")
-        return success
+        return False
 
 
 def js_commission_probe(driver):
@@ -589,8 +568,7 @@ def process_row(driver, row_num, thread_url):
             try:
                 err = driver.find_element(By.CSS_SELECTOR, "h2.errorPage__headline")
                 if "400 Error" in err.text:
-                    print("400 Error detected")
-                    upload_debug_screenshot(driver, row_num, "400_Error")
+                    print("400 Error")
                     return "400 Error"
             except Exception:
                 pass
@@ -600,7 +578,6 @@ def process_row(driver, row_num, thread_url):
             if url_hint:
                 if "amazon." not in url_hint.lower():
                     print("ℹ️ Direct outclick is non-Amazon, skipping commission.")
-                    upload_debug_screenshot(driver, row_num, "Non_Amazon_Direct")
                     return "NON-AMAZON"
                 try:
                     driver.set_page_load_timeout(60)
@@ -628,19 +605,16 @@ def process_row(driver, row_num, thread_url):
                         print(
                             "ℹ️ Outclick goes to non-Amazon store, skipping commission."
                         )
-                        upload_debug_screenshot(driver, row_num, "Non_Amazon_Redirect")
                         if tab_tuple[0]:
                             safe_close_extra_tabs(driver, tab_tuple[0])
                         return "NON-AMAZON"
                     print("❌ Did not arrive on Amazon after outclick")
-                    upload_debug_screenshot(driver, row_num, "Failed_Outclick")
                     if tab_tuple[0]:
                         safe_close_extra_tabs(driver, tab_tuple[0])
                     continue
 
             if not ensure_on_amazon(driver, 10):
                 print("❌ Not on Amazon")
-                upload_debug_screenshot(driver, row_num, "Not_On_Amazon")
                 continue
 
             current_product_url = driver.current_url
@@ -658,7 +632,6 @@ def process_row(driver, row_num, thread_url):
 
             if not base_text and not bonus_text:
                 print("❌ Commission widgets not found")
-                upload_debug_screenshot(driver, row_num, "No_Widgets")
                 continue
 
             base_value = extract_rate(base_text)
@@ -679,7 +652,6 @@ def process_row(driver, row_num, thread_url):
 
         except Exception as e:
             print(f"❌ Unexpected error row {row_num}: {e}")
-            upload_debug_screenshot(driver, row_num, "Exception")
             if is_driver_connection_error(e):
                 print("💥 Detected WebDriver connection crash (HTTPConnectionPool/DevTools/etc).")
                 raise DriverCrashed(str(e))
