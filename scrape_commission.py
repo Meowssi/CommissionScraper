@@ -108,7 +108,8 @@ def upload_debug_screenshot(driver, row_num, reason="error"):
     and prints the link to the logs for debugging.
     """
     try:
-        filename = f"debug_row_{row_num}_{int(time.time())}.png"
+        # Generate a unique filename using timestamp
+        filename = f"debug_{row_num}_{int(time.time())}.png"
         driver.save_screenshot(filename)
         print(f"📸 Uploading screenshot for {reason}...")
         
@@ -127,7 +128,7 @@ def upload_debug_screenshot(driver, row_num, reason="error"):
     except Exception as e:
         print(f"❌ Could not capture/upload screenshot: {e}")
     finally:
-        # Clean up local file
+        # Clean up local file to save space
         if os.path.exists(filename):
             try:
                 os.remove(filename)
@@ -242,7 +243,10 @@ def amazon_login(driver, email, password, timeout=30):
         print("✅ Login successful. Ready to process rows.")
         return True
     except Exception as e:
+        # === UPDATE: Added Screenshot Logic Here ===
         print(f"❌ Error during login automation: {e}")
+        upload_debug_screenshot(driver, "LOGIN_FAIL", "Login_Crash") 
+        # ===========================================
         if is_driver_connection_error(e):
             raise DriverCrashed(str(e))
         return False
@@ -271,6 +275,9 @@ def ensure_amazon_session(driver, email, password):
         
     except Exception as e:
         print(f"🔐 Amazon session check failed, attempting login... ({e})")
+        # === UPDATE: Added Screenshot Logic Here ===
+        upload_debug_screenshot(driver, "SESSION_FAIL", "Session_Check_Crash")
+        # ===========================================
         if is_driver_connection_error(e):
             raise DriverCrashed(str(e))
         
