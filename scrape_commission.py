@@ -1,4 +1,5 @@
-import os, re, time, random, json, requests
+import os, re, time, random, json
+# Removed 'requests' to fix the dependency warning since we don't need it anymore
 from urllib.parse import urlparse, parse_qs, unquote
 import warnings
 
