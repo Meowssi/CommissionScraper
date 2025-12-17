@@ -101,8 +101,14 @@ def chrome_driver():
     options.add_argument("--log-level=3")
     options.add_argument("--remote-debugging-port=9222")
     
-    # Standard User Agent
-    options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+    # === USE CUSTOM USER AGENT ===
+    custom_ua = os.environ.get("USER_AGENT")
+    if custom_ua:
+        print(f"🕵️ Using Custom User-Agent: {custom_ua[:50]}...")
+        options.add_argument(f"user-agent={custom_ua}")
+    else:
+        print("⚠️ No USER_AGENT env var found. Using default.")
+        options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
 
     profile_dir = os.path.join(
         PROFILE_ROOT,
@@ -132,10 +138,6 @@ def new_driver_with_retries(max_retries=3, backoff=5):
 # === COOKIE HELPER (IMPROVED) ===
 
 def inject_cookies_from_env(driver):
-    """
-    Reads the AMAZON_COOKIES environment variable and injects them.
-    Aggressively cleans cookie data to ensure Selenium accepts them.
-    """
     env_cookies = os.environ.get("AMAZON_COOKIES")
     if not env_cookies:
         return False
@@ -144,56 +146,40 @@ def inject_cookies_from_env(driver):
     try:
         cookies = json.loads(env_cookies)
         
-        # Navigate to the domain first (Required by Selenium)
-        driver.get("https://affiliate-program.amazon.com") 
+        # 1. Go to root domain first (Crucial for session cookies)
+        driver.get("https://www.amazon.com")
         time.sleep(2)
-        
         driver.delete_all_cookies()
         
-        added_count = 0
+        # 2. Inject
         for cookie in cookies:
-            # === CRITICAL FIXES ===
-            # 1. Remove 'domain' so Selenium accepts it for the current page context
+            if 'sameSite' in cookie and cookie['sameSite'] not in ["Strict", "Lax", "None"]:
+                del cookie['sameSite']
+            # Remove domain to let Selenium set it for current context (amazon.com)
             if 'domain' in cookie:
                 del cookie['domain']
-            
-            # 2. Fix SameSite attribute
-            if 'sameSite' in cookie:
-                if cookie['sameSite'] not in ["Strict", "Lax", "None"]:
-                    del cookie['sameSite']
-            
-            # 3. Remove other problematic keys
-            for key in ['storeId', 'hostOnly', 'session']:
-                if key in cookie:
-                    del cookie[key]
                 
             try:
                 driver.add_cookie(cookie)
-                added_count += 1
             except Exception:
-                # Skip individual bad cookies
                 pass
                 
-        print(f"✅ Injected {added_count}/{len(cookies)} cookies. Refreshing page...")
-        driver.refresh()
+        # 3. Go to Affiliate Page
+        print("✅ Cookies injected. Navigating to Affiliate Home...")
+        driver.get("https://affiliate-program.amazon.com/home")
+        time.sleep(5)
         
-        # Wait longer for the session to restore
-        time.sleep(10)
-        
-        # Check URL to verify login
+        # 4. Verify
         current_url = driver.current_url.lower()
-        print(f"📍 Post-injection URL: {current_url}")
-        
         if "signin" not in current_url and "ap/signin" not in current_url:
             print("🎉 Session restored via Cookies! Login bypassed.")
             return True
         else:
-            print("⚠️ Cookie injection failed (Still on Sign-In page).")
+            print(f"⚠️ Cookie injection failed. Redirected to: {current_url[:60]}...")
             return False
             
     except Exception as e:
         print(f"❌ Error injecting cookies: {e}")
-        traceback.print_exc()
         return False
 
 
@@ -301,7 +287,6 @@ def amazon_login(driver, email, password, timeout=30):
 
     except Exception as e:
         print(f"❌ Error during login automation: {e}")
-        # Print full traceback to see why it crashed empty
         traceback.print_exc()
         if is_driver_connection_error(e):
             raise DriverCrashed(str(e))
