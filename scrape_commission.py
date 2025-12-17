@@ -1,4 +1,4 @@
-import os, re, time, random, json
+import os, re, time, random, json, requests
 from urllib.parse import urlparse, parse_qs, unquote
 import warnings
 
@@ -101,6 +101,40 @@ def new_driver_with_retries(max_retries=3, backoff=5):
 
 
 # === HELPERS ===
+
+def upload_debug_screenshot(driver, row_num, reason="error"):
+    """
+    Captures a screenshot, uploads it to file.io (ephemeral hosting),
+    and prints the link to the logs for debugging.
+    """
+    try:
+        filename = f"debug_row_{row_num}_{int(time.time())}.png"
+        driver.save_screenshot(filename)
+        print(f"📸 Uploading screenshot for {reason}...")
+        
+        # Upload to file.io (expires after 1 download or 2 weeks)
+        with open(filename, "rb") as f:
+            response = requests.post("https://file.io", files={"file": f})
+        
+        if response.status_code == 200:
+            data = response.json()
+            link = data.get("link")
+            print(f"🔗 SCREENSHOT LINK ({reason}): {link}")
+            return link
+        else:
+            print(f"❌ Screenshot upload failed: {response.text}")
+            
+    except Exception as e:
+        print(f"❌ Could not capture/upload screenshot: {e}")
+    finally:
+        # Clean up local file
+        if os.path.exists(filename):
+            try:
+                os.remove(filename)
+            except OSError:
+                pass
+    return None
+
 
 def select_store_id(driver, target_store="slickdeals09-20"):
     """
@@ -499,7 +533,8 @@ def process_row(driver, row_num, thread_url):
             try:
                 err = driver.find_element(By.CSS_SELECTOR, "h2.errorPage__headline")
                 if "400 Error" in err.text:
-                    print("400 Error")
+                    print("400 Error detected")
+                    upload_debug_screenshot(driver, row_num, "400_Error")
                     return "400 Error"
             except Exception:
                 pass
@@ -509,6 +544,7 @@ def process_row(driver, row_num, thread_url):
             if url_hint:
                 if "amazon." not in url_hint.lower():
                     print("ℹ️ Direct outclick is non-Amazon, skipping commission.")
+                    upload_debug_screenshot(driver, row_num, "Non_Amazon_Direct")
                     return "NON-AMAZON"
                 try:
                     driver.set_page_load_timeout(60)
@@ -536,16 +572,19 @@ def process_row(driver, row_num, thread_url):
                         print(
                             "ℹ️ Outclick goes to non-Amazon store, skipping commission."
                         )
+                        upload_debug_screenshot(driver, row_num, "Non_Amazon_Redirect")
                         if tab_tuple[0]:
                             safe_close_extra_tabs(driver, tab_tuple[0])
                         return "NON-AMAZON"
                     print("❌ Did not arrive on Amazon after outclick")
+                    upload_debug_screenshot(driver, row_num, "Failed_Outclick")
                     if tab_tuple[0]:
                         safe_close_extra_tabs(driver, tab_tuple[0])
                     continue
 
             if not ensure_on_amazon(driver, 10):
                 print("❌ Not on Amazon")
+                upload_debug_screenshot(driver, row_num, "Not_On_Amazon")
                 continue
 
             current_product_url = driver.current_url
@@ -563,6 +602,7 @@ def process_row(driver, row_num, thread_url):
 
             if not base_text and not bonus_text:
                 print("❌ Commission widgets not found")
+                upload_debug_screenshot(driver, row_num, "No_Widgets")
                 continue
 
             base_value = extract_rate(base_text)
@@ -583,6 +623,7 @@ def process_row(driver, row_num, thread_url):
 
         except Exception as e:
             print(f"❌ Unexpected error row {row_num}: {e}")
+            upload_debug_screenshot(driver, row_num, "Exception")
             if is_driver_connection_error(e):
                 print("💥 Detected WebDriver connection crash (HTTPConnectionPool/DevTools/etc).")
                 raise DriverCrashed(str(e))
